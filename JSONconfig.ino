@@ -1,7 +1,4 @@
 
-//#include <SD.h>
-//#include <SPI.h>
-
 /*
 // Configuration that we'll store on disk
 struct Config {
