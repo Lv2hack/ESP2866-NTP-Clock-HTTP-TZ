@@ -10,6 +10,10 @@
 //   Yes, this is unnecessarily complex (could have used integer for both
 //   settings) but I was learning the json stuff
 //   along with pointers which I still haven't figured out completely!
+//  
+//   1/25/18 - Added single button to set the clock.  Long press (3 seconds)
+//             places the clock into set mode then single press increments the TZ.
+//             Single button click also sets the brightness of the display.
 //
 //   Alex T.
 
@@ -21,6 +25,7 @@
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include "FS.h"
+#include "PMButton.h"
 
 //
 // For dealing with NTP & the clock.
@@ -31,7 +36,6 @@
 // The display-interface
 //
 #include "TM1637.h"
-
 
 //
 // WiFi setup.
@@ -49,7 +53,6 @@
 //
 #include "debug.h"
 
-
 //
 // The name of this project.
 //
@@ -59,14 +62,10 @@
 //
 #define PROJECT_NAME "NTP-CLOCK"
 
-
 //
 // The timezone - comment out to stay at GMT.
 //
 // #define TIME_ZONE (-7)
-
-// Defaults for TZ and brightness 
-int int_brightness = 2;
 
 // Configuration that we'll store on disk
 struct Config {
@@ -88,14 +87,23 @@ WiFiServer server(80);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
 
-
 //
 // Pin definitions for TM1637 and can be changed to other ports
 //
 #define CLK D3
 #define DIO D2
+#define BRT D1
+
+// Brightness variables
+// We're setting the brightness with a button connected to the BRT digital pin
+//
+int int_brightness = 2;
+int brtLevel = 1;  // This will be 0, 1, 2 for low med high brightness
+
 TM1637 tm1637(CLK, DIO);
 
+// Setup our button 
+PMButton button1(BRT);
 
 //
 // Called just before the date/time is updated via NTP
@@ -104,7 +112,6 @@ void on_before_ntp()
 {
     DEBUG_LOG("Updating date & time");
 }
-
 //
 // Called just after the date/time is updated via NTP
 //
@@ -128,6 +135,15 @@ void setup()
     //DEBUG_LOG("SPIFSS formatted please comment out this section!");
     //delay(100000);
 
+    // Setup button
+    button1.begin();
+  
+    //You can set button timing values for each button to fine tune interaction.
+    button1.debounce(20);//Default is 10 milliseconds
+    button1.dcGap(150);//Time between clicks for Double click. Default is 200 milliseconds
+    button1.holdTime(1500);//Default is 2 seconds
+    button1.longHoldTime(4500);//Default is 5 seconds
+
     //
     // Enable access to the SPIFFS filesystem.
     //
@@ -136,7 +152,6 @@ void setup()
        return;
      }
     
-
     //
     // Set the intensity - valid choices include:
     //
@@ -312,17 +327,68 @@ void loop()
         strcpy(prev , buf);
     }
 
+    //Get the current button state
+    button1.checkSwitch();
+    if (button1.clicked()) {         
+       // We've now detected a button state change (High or Low)
+       // If HIGH then change the brightness 
+       Serial.println("Button pushed");
+       brtLevel++;  // increment the brightness 
+       if (brtLevel > 2) { brtLevel = 0; }  // if brightness goes past 2 then reset it to zero 
+          
+       switch (brtLevel) {
+       case 0:
+          int_brightness = BRIGHT_DARKEST;
+          break;
+       case 1:
+          int_brightness = BRIGHT_TYPICAL;
+          break;
+       case 2:
+          int_brightness = BRIGHT_BRIGHTEST;
+          break;
+       }
+       tm1637.set(int_brightness);   
+          
+       // Update the display
+       tm1637.display(0, buf[0] - '0');
+       tm1637.display(1, buf[1] - '0');
+       tm1637.display(2, buf[2] - '0');
+       tm1637.display(3, buf[3] - '0');
+    }
 
-    //
-    // The preceeding piece of code would
-    // have ensured the display only updated
-    // when the hour/min changed.
-    //
-    // However note that we nuke the cached
-    // value every half-second - solely so we can
-    // blink the ":".
-    //
-    //  Sigh
+    if (button1.held())  {
+       Serial.println("Button held - setting time");
+       // Enter loop here to set display TZ
+       int setHour = 0;
+       int setTZ = config.timeZone;
+       while (true) {
+          button1.checkSwitch();      
+          if (button1.clicked()) {  
+             //increment the timezone
+             if (setTZ < 12) {   // if the TZ is smaller than 12
+                setTZ++;         // we can add one to it
+             } else { 
+                 setTZ = -11;    // the next TZ after 12 is -11
+             }
+             Serial.print("setTZ=");
+             Serial.println(setTZ);
+       
+             timeClient.setTimeOffset(setTZ * (60 * 60));   // update the TZ in the clock
+             int cur_hour = timeClient.getHours();
+             sprintf(buf, "%02d",  cur_hour); 
+             tm1637.display(0, buf[0] - '0'); 
+             tm1637.display(1, buf[1] - '0'); 
+             
+             yield();
+          }
+          if (button1.held()) break;
+          yield();
+       }
+       Serial.println("Updating with new timezone");
+       // Next you need to save the updated setting to SPIFFS
+       config.timeZone = setTZ;
+       saveConfiguration(filename, config);
+    }
 
     long now = millis();
 
@@ -345,9 +411,7 @@ void loop()
     }
 
     WiFiClient client = server.available();
-
-    if (client)
-        processHTTPRequest(client);
+    if (client) processHTTPRequest(client);
 
 }
 
